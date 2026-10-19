@@ -13,6 +13,7 @@ from typing import Callable, Protocol
 
 from spork30.config import AppConfig, load_config
 from spork30.execution import ClipSchedule
+from spork30.gateway import chain_failure_is_transient
 from spork30.live import _redact, assert_live_allowed, submit
 from spork30.models import BookTop, Phase
 from spork30.portfolio import Engine
@@ -156,11 +157,15 @@ def _reconcile_chain(engine: Engine, venue: Venue, quiet: bool = False) -> None:
     finished = getattr(venue, "finished_transactions", None)
     if finished is None:
         return
+    failed: list[dict] = []
     for result in finished():
         payload = result.get("payload") or {}
         kind = str(payload.get("kind") or "")
         slug = str(payload.get("slug") or "")
         if result.get("ok"):
+            market = engine.markets.get(slug)
+            if market is not None:
+                market.chain_attempts = 0
             engine._log({"event": "tx_confirmed", "slug": slug, "kind": kind,
                          "ticket": result.get("ticket", ""), "hash": result.get("hash", "")})
             if not quiet:
@@ -171,12 +176,12 @@ def _reconcile_chain(engine: Engine, venue: Venue, quiet: bool = False) -> None:
                      "ticket": result.get("ticket", ""), "error": message})
         if not quiet:
             print(f"failed {kind} {slug}: {message}", flush=True)
-        if kind == "SPLIT":
-            _undo_split(engine, payload)
-        elif kind == "MERGE":
-            _undo_merge(engine, payload)
-        elif kind == "REDEEM":
-            _undo_redeem(engine, payload)
+        failed.append(result)
+    # 先退后面的兑付，再退前面的合并，账面才对得上。
+    for result in reversed(failed):
+        payload = result.get("payload") or {}
+        message = _redact(str(result.get("error") or "relayer failure"))
+        _rollback_chain(engine, payload, message, retryable=bool(result.get("retryable")))
 
 
 def cancel_all_live(config: AppConfig, engine: Engine, venue: Venue, quiet: bool = False) -> int:
@@ -280,12 +285,8 @@ def _send(config: AppConfig, engine: Engine, venue: Venue, payload: dict, quiet:
             print(f"send failed {payload['kind']} {payload['slug']}: {message}", flush=True)
         if payload["kind"] == "PLACE":
             _drop_local_order(engine, payload.get("order_id", ""))
-        elif payload["kind"] == "SPLIT":
-            _undo_split(engine, payload)
-        elif payload["kind"] == "MERGE":
-            _undo_merge(engine, payload)
-        elif payload["kind"] == "REDEEM":
-            _undo_redeem(engine, payload)
+        else:
+            _rollback_chain(engine, payload, message, retryable=chain_failure_is_transient(message))
         return
     if payload["kind"] == "PLACE":
         order = _find_order(engine, payload["order_id"])
@@ -338,7 +339,27 @@ def _payload(engine: Engine, action) -> dict | None:
     return None
 
 
-def _undo_split(engine: Engine, payload: dict) -> None:
+def _rollback_chain(engine: Engine, payload: dict, message: str, *, retryable: bool) -> None:
+    """链上失败先把账面退回。跳过的后续任务只退账面。网络错误重试，超过次数或链上拒绝才停这场。"""
+    kind = payload.get("kind")
+    market = engine.markets.get(payload.get("slug") or "")
+    skipped = message.startswith("skipped:")
+    halt = False
+    if market is not None and not skipped:
+        if not retryable:
+            halt = True
+        else:
+            market.chain_attempts += 1
+            halt = market.chain_attempts >= engine.config.risk.max_retry_count
+    if kind == "SPLIT":
+        _undo_split(engine, payload, halt=halt)
+    elif kind == "MERGE":
+        _undo_merge(engine, payload, halt=halt)
+    elif kind == "REDEEM":
+        _undo_redeem(engine, payload, halt=halt)
+
+
+def _undo_split(engine: Engine, payload: dict, *, halt: bool = True) -> None:
     """The engine credits a mint before the chain accepts it. A revert undoes that."""
     market = engine.markets.get(payload["slug"])
     if market is None:
@@ -349,11 +370,15 @@ def _undo_split(engine: Engine, payload: dict) -> None:
     if market.down >= size:
         market.down -= size
     market.cash += size
-    if market.phase not in {Phase.HALTED, Phase.CLOSED}:
+    if halt and market.phase not in {Phase.HALTED, Phase.CLOSED}:
         engine.halt(market, "SPLIT_FAILED")
+    elif not halt and market.phase not in {Phase.HALTED, Phase.CLOSED}:
+        market.split_submitted = False
+        market.split_size = Decimal("0")
+        engine._transition(market, Phase.DISCOVERED, "split_retry")
 
 
-def _undo_merge(engine: Engine, payload: dict) -> None:
+def _undo_merge(engine: Engine, payload: dict, *, halt: bool = True) -> None:
     """The engine books a merge before the chain confirms it. Put the pairs back
     and halt the market so the stranded tokens are visible, not reported as cash."""
     market = engine.markets.get(payload["slug"])
@@ -364,10 +389,13 @@ def _undo_merge(engine: Engine, payload: dict) -> None:
     market.down += size
     market.cash -= size
     market.flatten_done = False
-    engine.halt(market, "MERGE_FAILED")
+    if halt:
+        engine.halt(market, "MERGE_FAILED")
+    elif market.phase not in {Phase.HALTED, Phase.CLOSED}:
+        engine._transition(market, Phase.FLATTEN_PENDING, "merge_retry")
 
 
-def _undo_redeem(engine: Engine, payload: dict) -> None:
+def _undo_redeem(engine: Engine, payload: dict, *, halt: bool = True) -> None:
     """Same for a redeem: restore the winner tokens, drop the booked PnL, halt."""
     market = engine.markets.get(payload["slug"])
     if market is None:
@@ -383,7 +411,10 @@ def _undo_redeem(engine: Engine, payload: dict) -> None:
         engine.risk_state.realized_pnl_today -= booked
         market.pnl_booked = False
     market.flatten_done = False
-    engine.halt(market, "REDEEM_FAILED")
+    if halt:
+        engine.halt(market, "REDEEM_FAILED")
+    elif market.phase is not Phase.HALTED:
+        engine._transition(market, Phase.REDEEM_PENDING, "redeem_retry")
 
 
 def _find_order(engine: Engine, order_id: str):

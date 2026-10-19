@@ -37,7 +37,6 @@ def check_order(
     side: Side,
     price: Decimal,
     size: Decimal,
-    open_markets: int,
     gross_exposure: Decimal,
     risk: RiskConfig,
     state: RiskState,
@@ -61,8 +60,6 @@ def check_order(
         raise RiskRefusal("STALE_DATA")
     if state.realized_pnl_today <= -risk.max_daily_loss:
         raise RiskRefusal("MAX_DAILY_LOSS")
-    if open_markets > risk.max_open_markets:
-        raise RiskRefusal("MAX_OPEN_MARKETS")
     if gross_exposure > risk.max_total_exposure:
         raise RiskRefusal("MAX_TOTAL_EXPOSURE")
     if size <= 0:
@@ -90,7 +87,6 @@ def check_order(
             "EMERGENCY_STOP_CLEAR",
             "DATA_FRESH",
             "DAILY_LOSS_OK",
-            "OPEN_MARKETS_OK",
             "EXPOSURE_OK",
             "SIZE_OK",
             "PRICE_OK",

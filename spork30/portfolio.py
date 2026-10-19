@@ -79,9 +79,6 @@ class Engine:
         position.transitions.append(note)
         self._log({"event": "transition", "slug": position.slug, "note": note})
 
-    def open_count(self) -> int:
-        return sum(1 for market in self.markets.values() if market.phase not in {Phase.CLOSED, Phase.HALTED})
-
     def gross_exposure(self) -> Decimal:
         total = Decimal("0")
         for market in self.markets.values():
@@ -320,8 +317,6 @@ class Engine:
             return self.halt(market, "MAX_DAILY_LOSS")
         if amount > self.config.risk.max_position_per_outcome:
             return self.halt(market, "MAX_POSITION")
-        if self.open_count() > self.config.risk.max_open_markets:
-            return self.halt(market, "MAX_OPEN_MARKETS")
         if self.gross_exposure() + amount > self.config.risk.max_total_exposure:
             return self.halt(market, "MAX_TOTAL_EXPOSURE")
         market.split_submitted = True
@@ -457,7 +452,6 @@ class Engine:
                     side=order.side,
                     price=order.price,
                     size=order.size,
-                    open_markets=self.open_count(),
                     gross_exposure=self.gross_exposure(),
                     risk=self.config.risk,
                     state=self.risk_state,
@@ -652,6 +646,7 @@ class Engine:
                     "resolved": market.resolved,
                     "halt_reason": market.halt_reason,
                     "pnl_booked": market.pnl_booked,
+                    "chain_attempts": market.chain_attempts,
                     "orders": [
                         {
                             "order_id": order.order_id,
@@ -701,6 +696,7 @@ class Engine:
                 # before the upgrade is treated as already booked so it is not
                 # counted again on reload.
                 pnl_booked=bool(row.get("pnl_booked", row["phase"] == Phase.CLOSED.value)),
+                chain_attempts=int(row.get("chain_attempts") or 0),
             )
             for item in row.get("orders") or []:
                 order = WorkingOrder(

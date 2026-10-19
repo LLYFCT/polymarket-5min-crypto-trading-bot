@@ -107,7 +107,7 @@ def test_daily_loss_blocks_new_split_and_quotes(tmp_path):
 
     with pytest.raises(RiskRefusal, match="MAX_DAILY_LOSS"):
         check_order(now=t, position=loser, outcome="Up", side=Side.SELL, price=Decimal("0.5"), size=Decimal("5"),
-                    open_markets=1, gross_exposure=Decimal("0"), risk=engine.config.risk, state=engine.risk_state,
+                    gross_exposure=Decimal("0"), risk=engine.config.risk, state=engine.risk_state,
                     reference=Decimal("0.5"))
 
 
@@ -190,7 +190,7 @@ def test_quote_check_receives_side_specific_reference(tmp_path, monkeypatch):
     # None of the references equal the price merely by construction when they differ:
     with pytest.raises(RiskRefusal, match="MAX_PRICE_DEVIATION"):
         check_order(now=now, position=m, outcome="Down", side=Side.SELL, price=Decimal("0.99"), size=Decimal("5"),
-                    open_markets=1, gross_exposure=Decimal("750"), risk=engine.config.risk, state=RiskState(),
+                    gross_exposure=Decimal("750"), risk=engine.config.risk, state=RiskState(),
                     reference=Decimal("0.48"))
 
 
@@ -238,7 +238,7 @@ def test_check_order_refuses_sell_beyond_unreserved_inventory(tmp_path):
     engine = make_engine(tmp_path)
     m = _quoting_market(engine, BASE, up="20", down="20")
     kwargs = dict(now=BASE, position=m, outcome="Up", side=Side.SELL, price=Decimal("0.5"), size=Decimal("15"),
-                  open_markets=1, gross_exposure=Decimal("750"), risk=engine.config.risk, state=RiskState(),
+                  gross_exposure=Decimal("750"), risk=engine.config.risk, state=RiskState(),
                   reference=Decimal("0.5"))
     assert "INVENTORY_OK" in check_order(**kwargs)
     with pytest.raises(RiskRefusal, match="SELL_EXCEEDS_INVENTORY"):

@@ -106,6 +106,8 @@ class MarketPosition:
     last_book_ts: int | None = None
     halt_reason: str | None = None
     pnl_booked: bool = False
+    # 网络类链上失败的已试次数，超过上限才停这场。
+    chain_attempts: int = 0
     transitions: list[str] = field(default_factory=list)
 
     def inventory(self, outcome: str) -> Decimal:

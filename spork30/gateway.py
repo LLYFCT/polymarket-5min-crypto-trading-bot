@@ -46,6 +46,12 @@ class GaslessNotConfigured(RuntimeError):
     pass
 
 
+def chain_failure_is_transient(message: str) -> bool:
+    """握手超时、连接被拒绝。请求多半没发出去，可以再试。链上拒绝不算。"""
+    text = message.lower()
+    return any(part in text for part in ("_ssl.c", "handshake", "connection refused", "unexpected_eof", "errno 61"))
+
+
 class ChainWorker:
     """Runs relayer transactions off the loop thread, one at a time, in order.
 
@@ -97,26 +103,29 @@ class ChainWorker:
         return not self.pending()
 
     def _loop(self) -> None:
-        # Once a transaction on a market fails, later ones queued for the same
-        # market are not sent. A REDEEM after a failed MERGE would redeem the
-        # un-merged pairs' winner side too, and the engine's rollback of the
-        # merge would then disagree with the chain. Reporting the skip as a
-        # failure rolls both back, so local state matches the chain exactly.
-        failed: set[str] = set()
+        # 失败时只跳过已经排进队列的同一场任务（合并失败后紧跟着的兑付）。
+        # 序号更大的是失败之后新提交的，仍然发送，不把后面的局停掉。
+        blocked: dict[str, int] = {}
         while True:
             ticket, payload = self._jobs.get()
             slug = str(payload.get("slug") or "")
-            if slug in failed:
+            seq = int(ticket.split("-", 1)[1])
+            limit = blocked.get(slug)
+            if limit is not None and seq <= limit:
                 result = {"ticket": ticket, "payload": payload, "ok": False,
                           "error": "skipped: an earlier transaction on this market failed"}
+                if seq == limit:
+                    blocked.pop(slug, None)
             else:
                 try:
                     tx_hash = self._run(payload)
                     result = {"ticket": ticket, "payload": payload, "ok": True, "hash": tx_hash}
                 except Exception as exc:  # the loop thread decides what a failure means
-                    failed.add(slug)
+                    message = _redact(f"{type(exc).__name__}: {exc}")
+                    with self._lock:
+                        blocked[slug] = self._seq
                     result = {"ticket": ticket, "payload": payload, "ok": False,
-                              "error": _redact(f"{type(exc).__name__}: {exc}")}
+                              "error": message, "retryable": chain_failure_is_transient(message)}
             with self._lock:
                 self._pending.pop(ticket, None)
             self._done.put(result)

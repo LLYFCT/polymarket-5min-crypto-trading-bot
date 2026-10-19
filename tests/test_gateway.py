@@ -260,6 +260,12 @@ def test_chain_jobs_run_in_order_and_skip_after_a_failure(tmp_path):
     assert "reverted" in done[0]["error"] and "skipped" in done[1]["error"]
     # The REDEEM on the failed market was never sent; the other market's was.
     assert calls == ["MERGE", "REDEEM:33"]
+    # 失败之后新提交的同一场任务要发出去，不能再被旧的失败名单拦住。
+    venue({"kind": "REDEEM", "slug": slug, "size": "50", "winner": "Up"})
+    assert venue.wait_for_chain(timeout=5)
+    again = venue.finished_transactions()
+    assert again[0]["ok"] is True
+    assert calls == ["MERGE", "REDEEM:33", "REDEEM:11"]
 
 
 def test_unknown_market_fails_synchronously(tmp_path):

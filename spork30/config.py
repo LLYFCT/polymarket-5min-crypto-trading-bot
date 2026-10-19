@@ -138,7 +138,6 @@ class RiskConfig:
     max_order_size: Decimal = Decimal("20")
     max_daily_loss: Decimal = Decimal("1000")
     max_total_exposure: Decimal = Decimal("3000")
-    max_open_markets: int = 8
     max_orders_per_10s: int = 40
     max_retry_count: int = 3
     stale_data_timeout_seconds: int = 5
@@ -244,7 +243,6 @@ def load_config() -> AppConfig:
             max_order_size=_decimal("MAX_ORDER_SIZE", "20"),
             max_daily_loss=_decimal("MAX_DAILY_LOSS", "1000"),
             max_total_exposure=_decimal("MAX_TOTAL_EXPOSURE", "3000"),
-            max_open_markets=_int("MAX_OPEN_MARKETS", 8),
             max_orders_per_10s=_int("MAX_ORDER_RATE", 40),
             max_retry_count=_int("MAX_RETRY_COUNT", 3),
             stale_data_timeout_seconds=_int("STALE_DATA_TIMEOUT", 5),

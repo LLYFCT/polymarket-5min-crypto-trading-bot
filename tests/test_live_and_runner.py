@@ -14,7 +14,7 @@ from conftest import make_config
 def test_sell_at_or_below_bid_is_refused(tmp_path):
     config = make_config(tmp_path)
     position = MarketPosition(slug="x", start=300, up=Decimal("750"), down=Decimal("750"))
-    common = dict(now=1, position=position, outcome="Down", side=Side.SELL, size=Decimal("5"), open_markets=1,
+    common = dict(now=1, position=position, outcome="Down", side=Side.SELL, size=Decimal("5"),
                   gross_exposure=Decimal("750"), risk=config.risk, state=RiskState(), reference=Decimal("0.59"))
     with pytest.raises(RiskRefusal, match="WOULD_CROSS"):
         check_order(price=Decimal("0.59"), bid=Decimal("0.59"), **common)
