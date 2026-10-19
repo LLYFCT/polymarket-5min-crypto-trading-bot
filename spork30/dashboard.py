@@ -33,7 +33,7 @@ def trading_notice(book: Book, log_path: str, now: int) -> str:
     """Why the live screen has no orders. Empty when this window is being quoted."""
     path = Path(log_path)
     if not path.exists() or path.stat().st_size == 0:
-        return "order loop is not running. Start it with: python -m spork30.live --run"
+        return "下单循环没启动。启动命令：python -m spork30.live --run"
     window = now - (now % 300)
     market = book.active(now)
     if market is not None and market.start == window and market.phase != "HALTED":
@@ -50,10 +50,10 @@ def live_status() -> str:
     funder = bool(os.environ.get("POLYMARKET_FUNDER"))
     signature = os.environ.get("POLYMARKET_SIGNATURE_TYPE", "3")
     parts = [
-        f"confirm {'yes' if confirm else 'no'}",
-        f"key {'set' if key else 'missing'}",
-        f"funder {'set' if funder else 'missing'}",
-        f"sig {signature}",
+        f"确认 {'开' if confirm else '关'}",
+        f"私钥 {'有' if key else '无'}",
+        f"钱包 {'有' if funder else '无'}",
+        f"签名 {signature}",
     ]
     return "  ".join(parts)
 
@@ -271,9 +271,9 @@ def main(argv: list[str] | None = None) -> None:
     if live:
         status = live_status()
     elif follow:
-        status = "following the decision log"
+        status = "只看已有记录"
     else:
-        status = "live 5-minute clock, sim sells are local"
+        status = "按真实的5分钟走，卖出只是本机演示"
         log_path.write_text("", encoding="utf-8")
 
     stop = threading.Event()
@@ -379,8 +379,8 @@ def _notice(book: Book, log_path: str, now: int, follow: bool, loop_error: list[
     if not follow:
         return ""
     notice = trading_notice(book, log_path, now)
-    if sends and notice.startswith("order loop is not running"):
-        return "order loop is starting"
+    if sends and notice.startswith("下单循环没启动"):
+        return "下单循环正在启动"
     return notice
 
 

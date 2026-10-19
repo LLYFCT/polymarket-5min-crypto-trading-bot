@@ -38,24 +38,24 @@ def test_live_screen_shows_quotes_orders_risk_and_health():
                 "maker_rebate_bps": Decimal("42")},
     )
     text = snapshot_text(layout)
-    assert "LIVE" in text and "runs the order loop" in text
-    # 10 sold at 0.52 = 5.20 notional; 42 bps of that is 0.02, shown as an estimate, never booked.
-    assert "rebate est" in text and "42 bps of 5.20 sold, not booked" in text
+    assert "实盘" in text and "这个画面会发单" in text
+    # 10 张按 0.52 卖掉，金额 5.20；万分之 42 约 0.02，只作估计，不入账。
+    assert "返佣估计" in text and "卖掉 5.20 的万分之 42" in text
     assert book.sold_notional() == Decimal("5.20")
-    assert "ask Up 0.52" in text and "Down 0.49" in text and "pair 1.01" in text
-    assert "o-dn" not in text and "Down" in text and "39s" in text  # resting Down ask aged 39 s
-    assert "sold" in text and "10 @ 0.520" in text
-    assert "websocket connected, 7 events" in text and "1 pending" in text and "41 ms" in text
-    assert "exposure" in text and "750.00 of 3000.00" in text
-    assert "refusals" in text and "WOULD_CROSS" in text
-    assert "split landed 0xabababab" in text
+    assert "涨卖价 0.52" in text and "跌卖价 0.49" in text and "一对 1.01" in text
+    assert "o-dn" not in text and "跌" in text and "39秒" in text
+    assert "卖涨" in text and "10 @ 0.520" in text
+    assert "推送已连接，7 条" in text and "1 笔待确认" in text and "41 毫秒" in text
+    assert "占用资金" in text and "750.00 / 3000.00" in text
+    assert "拦截" in text and "WOULD_CROSS" in text
+    assert "拆分 已上链 0xabababab" in text
 
 
 def test_simulation_screen_without_events_is_calm():
     book = Book()
     text = snapshot_text(build(book, mode="SIMULATION", status="sim", log_path="p", emergency=False, clock=BASE + 5))
-    assert "SIMULATION" in text and "no minted window" in text and "none resting" in text
-    assert "no events yet" in text and "simulated" in text
+    assert "模拟" in text and "还没有拆分" in text and "没有挂单" in text
+    assert "还没有事件" in text and "模拟：顺着现价的一边" in text
 
 
 def test_emergency_and_halt_are_loud():
@@ -65,5 +65,5 @@ def test_emergency_and_halt_are_loud():
     book.apply({"event": "halt", "slug": slug, "ts": BASE + 9, "reason": "MAX_PRICE_DEVIATION"})
     book.apply({"event": "unwind", "slug": slug, "ts": BASE + 372, "halt_reason": "MAX_PRICE_DEVIATION", "up": "750", "down": "750"})
     text = snapshot_text(build(book, mode="LIVE", status="s", log_path="p", emergency=True, clock=BASE + 373))
-    assert "EMERGENCY STOP" in text and "HALTED" in text and "MAX_PRICE_DEVIATION" in text
-    assert "unwinding" in text
+    assert "紧急停止" in text and "已停止" in text and "MAX_PRICE_DEVIATION" in text
+    assert "正在退回" in text

@@ -126,7 +126,7 @@ class Book:
             return
         if event == "day_roll":
             self.realized_today = Decimal("0")
-            self.tape.append(TapeLine(event="day", slug="", detail=f"UTC day {record.get('to')}: realized reset (was {record.get('realized')})", ts=_ts(record)))
+            self.tape.append(TapeLine(event="day", slug="", detail=f"世界时换日 {record.get('to')}：已结盈亏清零（原 {record.get('realized')}）", ts=_ts(record)))
             return
         if market is None:
             return
@@ -137,7 +137,7 @@ class Book:
             market.cash -= _dec(record.get("size"))
             market.split_size = _dec(record.get("size"))
             market.phase = "QUOTING"
-            self._blotter(slug, "split", f"mint {record.get('size')} Up and {record.get('size')} Down", _ts(record))
+            self._blotter(slug, "split", f"拆出 {record.get('size')} 涨和 {record.get('size')} 跌", _ts(record))
         elif event == "place":
             order_id = str(record.get("order_id") or "")
             outcome = str(record.get("outcome") or "")
@@ -157,21 +157,22 @@ class Book:
             if record.get("reference_price") is not None:
                 market.reference = _dec(record.get("reference_price"))
             if previous is None:
-                self._blotter(slug, "open", f"resting sell {size} {outcome} @ {record.get('price')}", _ts(record))
+                self._blotter(slug, "open", f"挂卖 {size} {_side(outcome)} @ {record.get('price')}", _ts(record))
             else:
                 market.replaces += 1
                 if abs(price - previous) >= Decimal("0.01"):
-                    self._blotter(slug, "reprice", f"{outcome} ask {previous} -> {record.get('price')}", _ts(record))
+                    self._blotter(slug, "reprice", f"{_side(outcome)}卖价 {previous} -> {record.get('price')}", _ts(record))
         elif event == "cancel":
             market.orders.pop(str(record.get("order_id") or ""), None)
         elif event == "risk_refuse":
-            self._blotter(slug, "refuse", f"{record.get('outcome')} {record.get('reason')} @ {record.get('price')} x {record.get('size')}", _ts(record))
+            self._blotter(slug, "refuse", f"{_side(str(record.get('outcome') or ''))} {record.get('reason')} @ {record.get('price')} x {record.get('size')}", _ts(record))
         elif event == "tx_confirmed":
             tx = str(record.get("hash") or "")
             shown = f"{tx[:10]}..{tx[-4:]}" if len(tx) > 14 else tx
-            self._blotter(slug, "confirm", f"{str(record.get('kind') or '').lower()} landed {shown}", _ts(record))
+            kind = str(record.get("kind") or "").lower()
+            self._blotter(slug, "confirm", f"{_KIND.get(kind, kind)} 已上链 {shown}", _ts(record))
         elif event == "unwind":
-            self._blotter(slug, "unwind", f"halted ({record.get('halt_reason')}) but holding {record.get('up')} Up / {record.get('down')} Down: unwinding", _ts(record))
+            self._blotter(slug, "unwind", f"已停止（{record.get('halt_reason')}），仍持有 {record.get('up')} 涨 / {record.get('down')} 跌，正在退回", _ts(record))
         elif event == "fill":
             outcome = str(record.get("outcome") or "")
             size = _dec(record.get("size"))
@@ -186,8 +187,8 @@ class Book:
                 market.sold_down += size
                 market.sold_down_usdc += size * price
             left = record.get("inventory")
-            left_note = f", {left} {outcome} left" if left is not None else ""
-            self._blotter(slug, "fill", f"sold {record.get('size')} {outcome} @ {record.get('price')}{left_note}", _ts(record))
+            left_note = f"，剩 {left} {_side(outcome)}" if left is not None else ""
+            self._blotter(slug, "fill", f"卖出 {record.get('size')} {_side(outcome)} @ {record.get('price')}{left_note}", _ts(record))
             order = market.orders.get(str(record.get("order_id") or ""))
             if order is not None:
                 order.remaining = str(record.get("remaining_order") or "0")
@@ -198,7 +199,7 @@ class Book:
             market.down = _dec(record.get("down"))
             market.cash += _dec(record.get("size"))
             market.orders.clear()
-            self._blotter(slug, "merge", f"merged {record.get('size')} pairs back to USDC", _ts(record))
+            self._blotter(slug, "merge", f"合并 {record.get('size')} 对，换回美元", _ts(record))
         elif event == "redeem":
             winner = str(record.get("winner") or "")
             amount = _dec(record.get("size"))
@@ -211,7 +212,7 @@ class Book:
             market.phase = "CLOSED"
             market.winner = winner
             market.orders.clear()
-            self._blotter(slug, "redeem", f"{winner} won, redeemed {record.get('size')}, cycle pnl {record.get('cash')}", _ts(record))
+            self._blotter(slug, "redeem", f"{_side(winner)}赢，兑付 {record.get('size')}，本局盈亏 {record.get('cash')}", _ts(record))
         elif event == "halt":
             market.phase = "HALTED"
             market.halt_reason = str(record.get("reason") or "halt")
@@ -267,7 +268,7 @@ class Book:
         if slug and slug not in self.markets:
             self.markets[slug] = MarketView(slug=slug)
         error = str(record.get("error") or "rejected")
-        self._blotter(slug, "reject", f"{kind.lower()} rejected: {error}", _ts(record))
+        self._blotter(slug, "reject", f"{_KIND.get(kind.lower(), kind.lower())} 被拒: {error}", _ts(record))
         market = self.markets.get(slug)
         # A failed mint leaves no tokens whether the failure was reported at
         # send time or, with the chain worker, a few ticks after the ack.
@@ -402,6 +403,17 @@ class LogTail:
             if isinstance(payload, dict):
                 records.append(payload)
         return records
+
+
+def _side(outcome: str) -> str:
+    if outcome == "Up":
+        return "涨"
+    if outcome == "Down":
+        return "跌"
+    return outcome or "-"
+
+
+_KIND = {"split": "拆分", "place": "挂单", "merge": "合并", "redeem": "兑付"}
 
 
 def _ts(record: dict) -> int:
