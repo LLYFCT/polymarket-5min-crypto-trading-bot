@@ -111,9 +111,17 @@ class StrategyConfig:
     maker_rebate_bps: Decimal = Decimal("42")
     # On-grid clustered fill sizes, with Oct 5-12 fill counts
     # (10 42%, 5 33%, 15 23%, 20 2%). Fill sizes understate order sizes
-    # because of partials, so this is a prior.
+    # because of partials, so this is a prior. CLIP_SIZE=5 时只挂固定张数。
     clip_sizes: tuple[int, ...] = (5, 10, 15, 20)
     clip_weights: tuple[int, ...] = (8892, 11348, 6151, 581)
+    # 算出的卖价不高于这个数就不挂。0 表示不限制。
+    min_ask_price: Decimal = Decimal("0")
+    # 窗口结束前 N 秒：被下限挡住的一边市价卖掉。0 表示关闭。
+    exit_market_seconds: int = 0
+    # 兜底是否扫买盘：1=挂到最小价保证成交；0=打在买价再减 EXIT_SLIP_TICKS。
+    exit_sweep: bool = False
+    # 非扫盘时，卖价 = 买价 - N 档，减少追跌挂不上。
+    exit_slip_ticks: int = 2
     dust_shares: Decimal = Decimal("1")
 
 
@@ -170,6 +178,26 @@ def load_env_file(path: Path | None = None) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def _clip_schedule(defaults: StrategyConfig) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    # CLIP_SIZE=5 关闭随机权重，只挂固定张数。以后要加档再改 CLIP_SIZES。
+    raw = os.environ.get("CLIP_SIZE", "").strip()
+    if raw:
+        size = int(raw)
+        return (size,), (1,)
+    raw_sizes = os.environ.get("CLIP_SIZES", "").strip()
+    if not raw_sizes:
+        return defaults.clip_sizes, defaults.clip_weights
+    sizes = tuple(int(part.strip()) for part in raw_sizes.split(",") if part.strip())
+    raw_weights = os.environ.get("CLIP_WEIGHTS", "").strip()
+    if raw_weights:
+        weights = tuple(int(part.strip()) for part in raw_weights.split(",") if part.strip())
+    else:
+        weights = tuple(1 for _ in sizes)
+    if not sizes or len(sizes) != len(weights):
+        raise SystemExit("CLIP_SIZES and CLIP_WEIGHTS must be non-empty and the same length")
+    return sizes, weights
+
+
 def load_config() -> AppConfig:
     load_env_file()
     raw_mode = os.environ.get("TRADING_MODE", "SIMULATION").strip().upper()
@@ -182,6 +210,7 @@ def load_config() -> AppConfig:
     # so those lines are not shown as exchange trades.
     root = os.path.join(base, "live" if mode is TradingMode.LIVE else "sim")
     defaults = StrategyConfig()
+    clip_sizes, clip_weights = _clip_schedule(defaults)
     return AppConfig(
         trading_mode=mode,
         strategy=StrategyConfig(
@@ -200,6 +229,15 @@ def load_config() -> AppConfig:
             spot_lag_seconds=_int("SPOT_LAG_SECONDS", defaults.spot_lag_seconds),
             fair_vol_annual=_decimal("FAIR_VOL_ANNUAL", str(defaults.fair_vol_annual)),
             maker_rebate_bps=_decimal("MAKER_REBATE_BPS", str(defaults.maker_rebate_bps)),
+            clip_sizes=clip_sizes,
+            clip_weights=clip_weights,
+            min_ask_price=_decimal("MIN_ASK_PRICE", "0"),
+            exit_market_seconds=_int("EXIT_MARKET_SECONDS", defaults.exit_market_seconds),
+            exit_sweep=os.environ.get(
+                "EXIT_SWEEP", "1" if defaults.exit_sweep else "0"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
+            exit_slip_ticks=_int("EXIT_SLIP_TICKS", defaults.exit_slip_ticks),
         ),
         risk=RiskConfig(
             max_position_per_outcome=_decimal("MAX_POSITION", "800"),
@@ -210,6 +248,7 @@ def load_config() -> AppConfig:
             max_orders_per_10s=_int("MAX_ORDER_RATE", 40),
             max_retry_count=_int("MAX_RETRY_COUNT", 3),
             stale_data_timeout_seconds=_int("STALE_DATA_TIMEOUT", 5),
+            min_price=_decimal("MIN_ASK_PRICE", str(RiskConfig.min_price)),
         ),
         state_path=os.path.join(root, "state.json"),
         decision_log_path=os.path.join(root, "decisions.jsonl"),

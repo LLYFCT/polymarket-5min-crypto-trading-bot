@@ -44,6 +44,7 @@ def check_order(
     reference: Decimal | None,
     bid: Decimal | None = None,
     reserved: Decimal = Decimal("0"),
+    allow_cross: bool = False,
 ) -> list[str]:
     """Return the checks that passed. Raise RiskRefusal on the first failure.
 
@@ -51,6 +52,7 @@ def check_order(
     would cross; post-only rejects it and a plain order pays the taker fee.
     `reserved` is inventory already committed to other sells the exchange may
     still fill; a new sell must fit in what is left.
+    `allow_cross` 为真时允许打到买价（局末市价兜底），并放宽最低价。
     """
     passed: list[str] = []
     if state.emergency_stop:
@@ -67,11 +69,12 @@ def check_order(
         raise RiskRefusal("NON_POSITIVE_SIZE")
     if size > risk.max_order_size:
         raise RiskRefusal("MAX_ORDER_SIZE")
-    if price < risk.min_price or price > risk.max_price:
+    floor = Decimal("0.001") if allow_cross else risk.min_price
+    if price < floor or price > risk.max_price:
         raise RiskRefusal("PRICE_BAND")
-    if reference is not None and abs(price - reference) > risk.max_price_jump:
+    if not allow_cross and reference is not None and abs(price - reference) > risk.max_price_jump:
         raise RiskRefusal("MAX_PRICE_DEVIATION")
-    if side is Side.SELL and bid is not None and price <= bid:
+    if not allow_cross and side is Side.SELL and bid is not None and price <= bid:
         raise RiskRefusal("WOULD_CROSS")
     inventory = position.inventory(outcome)
     if side is Side.SELL and size > inventory - reserved:
@@ -91,7 +94,7 @@ def check_order(
             "EXPOSURE_OK",
             "SIZE_OK",
             "PRICE_OK",
-            "MAKER_OK",
+            "MAKER_OK" if not allow_cross else "TAKER_OK",
             "INVENTORY_OK",
             "RATE_OK",
         ]

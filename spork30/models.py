@@ -24,6 +24,8 @@ class Side(str, Enum):
 
 class OrderKind(str, Enum):
     LIMIT_MAKER = "LIMIT_MAKER"
+    # 局末兜底：打到买价立刻卖掉，允许吃单。
+    LIMIT_TAKER = "LIMIT_TAKER"
 
 
 @dataclass
@@ -93,6 +95,8 @@ class MarketPosition:
     cash: Decimal = Decimal("0")
     split_submitted: bool = False
     flatten_done: bool = False
+    # 局末兜底卖完配对后为真，剩余涨跌不再挂单，留给合并。
+    quotes_frozen: bool = False
     winner: str | None = None
     resolved: bool = False
     orders: dict[str, WorkingOrder] = field(default_factory=dict)

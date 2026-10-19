@@ -16,7 +16,7 @@ from typing import Callable
 
 from spork30.config import AppConfig
 from spork30.execution import ClipSchedule, desired_asks, reference_up
-from spork30.models import BookTop, DesiredOrder, MarketPosition, Phase, Side, WorkingOrder, window_start_for
+from spork30.models import BookTop, DesiredOrder, MarketPosition, OrderKind, Phase, Side, WorkingOrder, window_start_for
 from spork30.risk import RiskRefusal, RiskState, check_order, note_order
 from spork30.strategy import (
     fair_up,
@@ -350,6 +350,23 @@ class Engine:
         fair: Decimal | None = None,
     ) -> list[Action]:
         actions: list[Action] = []
+        strategy = self.config.strategy
+        seconds_left = market.start + strategy.window_seconds - now
+        exit_now = (
+            strategy.exit_market_seconds > 0
+            and 0 < seconds_left <= strategy.exit_market_seconds
+        )
+        # 进入末段：两边张数已相等（含一直 10/10）则立刻冻结，不再开单，等合并。
+        # 张数不等时先走下面的扫盘配对，配平后下一秒也会进这里冻住。
+        if market.quotes_frozen or (exit_now and market.up == market.down):
+            if not market.quotes_frozen:
+                market.quotes_frozen = True
+                self._log({"event": "quotes_frozen", "slug": market.slug, "ts": now,
+                           "up": str(market.up), "down": str(market.down)})
+            if any(order.live for order in market.orders.values()):
+                self._cancel_all(market, "quotes_frozen")
+                actions.append(Action("QUOTES_PULLED", market.slug, {"reason": "quotes_frozen"}))
+            return actions
         if book is None and last_up_trade is None:
             self.risk_state.data_stale = True
             self._cancel_all(market, "no_reference_price")
@@ -363,7 +380,6 @@ class Engine:
                 self._cancel_all(market, "stale_book")
                 actions.append(Action("QUOTES_PULLED", market.slug, {"reason": "stale_book", "age": age}))
                 return actions
-        strategy = self.config.strategy
         if strategy.fair_edge > 0 and fair is None:
             # U6 is on but spot (or the price to beat) is missing or stale.
             # Quoting off the touch alone is the behaviour the replay measured
@@ -383,7 +399,10 @@ class Engine:
         tick = (book.tick if book is not None and book.tick else None) or strategy.price_tick
         live = {order.outcome: order for order in market.orders.values() if order.live and order.side is Side.SELL}
         # Pair-balance cap: withdraw the ask on the side that has run ahead.
-        blocked = frozenset(o for o in ("Up", "Down") if lean_blocked(o, market.up, market.down, strategy))
+        # 局末扫盘配对时不 lean，否则多出来的那边会被停掉。
+        blocked = frozenset()
+        if not exit_now:
+            blocked = frozenset(o for o in ("Up", "Down") if lean_blocked(o, market.up, market.down, strategy))
         for outcome in blocked:
             current = live.pop(outcome, None)
             if current is not None:
@@ -409,9 +428,19 @@ class Engine:
             tick=book.tick if book is not None else None,
             skip=blocked,
             fair=fair,
+            seconds_left=seconds_left,
         )
         if fair is not None:
             market.last_fair = fair
+        # 算价跌破下限后不再出现在 desired 里，撤掉还挂着的单。
+        wanted = {order.outcome for order in desired}
+        for outcome, current in list(live.items()):
+            if outcome in wanted:
+                continue
+            current.live = False
+            live.pop(outcome, None)
+            self._log({"event": "cancel", "slug": market.slug, "order_id": current.order_id, "reason": "min_ask"})
+            actions.append(Action("CANCEL", market.slug, {"order_id": current.order_id, "reason": "min_ask"}))
         for order in desired:
             # The per-order deviation check compares the order with the
             # reference for *its own* outcome. The Down reference is the
@@ -419,6 +448,7 @@ class Engine:
             # before, made |price - reference| identically zero and the check
             # could never fire.)
             side_reference = ref if order.outcome == "Up" else self.config.strategy.complement_sum - ref
+            allow_cross = order.kind is OrderKind.LIMIT_TAKER
             try:
                 checks = check_order(
                     now=now,
@@ -434,6 +464,7 @@ class Engine:
                     reference=side_reference,
                     bid=order.touch_bid,
                     reserved=reserved[order.outcome],
+                    allow_cross=allow_cross,
                 )
             except RiskRefusal as refusal:
                 self._log(
@@ -454,7 +485,11 @@ class Engine:
             # (should_requote). Resampling the size every second would cancel
             # the queue position; replacing on every tick sold at the leading
             # edge of every move.
-            if current and not should_requote(current.price, order.price, now - current.placed_ts, tick, strategy):
+            if (
+                current
+                and order.kind is OrderKind.LIMIT_MAKER
+                and not should_requote(current.price, order.price, now - current.placed_ts, tick, strategy)
+            ):
                 continue
             if current:
                 current.live = False
@@ -612,6 +647,7 @@ class Engine:
                     "cash": str(market.cash),
                     "split_submitted": market.split_submitted,
                     "flatten_done": market.flatten_done,
+                    "quotes_frozen": market.quotes_frozen,
                     "winner": market.winner,
                     "resolved": market.resolved,
                     "halt_reason": market.halt_reason,
@@ -657,6 +693,7 @@ class Engine:
                 cash=Decimal(row["cash"]),
                 split_submitted=bool(row["split_submitted"]),
                 flatten_done=bool(row["flatten_done"]),
+                quotes_frozen=bool(row.get("quotes_frozen", False)),
                 winner=row.get("winner"),
                 resolved=bool(row["resolved"]),
                 halt_reason=row.get("halt_reason"),
@@ -685,12 +722,17 @@ class Engine:
 
 
 def _explain(market: MarketPosition, order: DesiredOrder, order_id: str, now: int) -> dict:
+    taker = order.kind is OrderKind.LIMIT_TAKER
     return {
         "event": "place",
         "order_id": order_id,
         "slug": market.slug,
         "ts": now,
-        "why": "rest a maker ask on both outcomes while the 5-minute window is open",
+        "why": (
+            "window ending; sell blocked inventory at the bid"
+            if taker
+            else "rest a maker ask on both outcomes while the 5-minute window is open"
+        ),
         "rule": order.rule,
         "outcome": order.outcome,
         "side": order.side.value,
@@ -700,6 +742,7 @@ def _explain(market: MarketPosition, order: DesiredOrder, order_id: str, now: in
         "position": str(order.position),
         "phase": market.phase.value,
         "order_type": order.kind.value,
+        "post_only": not taker,
         "risk_checks": order.risk_checks,
         "market_state": {
             "start": market.start,

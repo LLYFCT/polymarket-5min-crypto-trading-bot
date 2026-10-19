@@ -15,8 +15,11 @@ decision log; this module only decides how to show them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+# 看板按北京时间显示；链上/窗口仍按 UTC 对齐。
+_BJ = timezone(timedelta(hours=8))
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -153,7 +156,7 @@ def header(book: Book, *, mode: str, status: str, emergency: bool, sends: bool, 
         title.append("  单子只在这台机器上", style="green")
     title.append("    ")
     title.append(_hms(now), style="bold yellow")
-    title.append(" 世界时", style="dim")
+    title.append(" 北京时间", style="dim")
     if now:
         start = now - (now % WINDOW)
         left = start + WINDOW - now
@@ -463,18 +466,18 @@ def _bar(value: Decimal, limit: Decimal, width: int = 12) -> str:
 def _hhmm(start: int | None) -> str:
     if not start:
         return "-"
-    return datetime.fromtimestamp(start, tz=timezone.utc).strftime("%H:%M")
+    return datetime.fromtimestamp(start, tz=_BJ).strftime("%H:%M")
 
 
 def _span(start: int) -> str:
-    end = datetime.fromtimestamp(start + WINDOW, tz=timezone.utc).strftime("%H:%M")
+    end = datetime.fromtimestamp(start + WINDOW, tz=_BJ).strftime("%H:%M")
     return f"{_hhmm(start)}-{end}"
 
 
 def _hms(ts: int) -> str:
     if not ts:
         return "-"
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(ts, tz=_BJ).strftime("%H:%M:%S")
 
 
 def _money(value: Decimal) -> str:

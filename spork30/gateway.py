@@ -539,7 +539,7 @@ class PolymarketVenue:
             side="SELL",
             price=payload["price"],
             size=payload["size"],
-            post_only=True,
+            post_only=bool(payload.get("post_only", True)),
         )
         if not getattr(response, "ok", False):
             message = getattr(response, "message", "order rejected")

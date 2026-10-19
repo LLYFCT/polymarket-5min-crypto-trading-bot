@@ -59,11 +59,13 @@ def desired_asks(
     rule: str = "regime_B_complementary_maker_ask",
     skip: frozenset[str] = frozenset(),
     fair: Decimal | None = None,
+    seconds_left: int | None = None,
 ) -> list[DesiredOrder]:
     """Both asks, except outcomes in `skip` (the pair-balance cap withdraws one).
 
     With `fair` (spot-implied P(Up)) and `fair_edge` > 0 the asks are priced
     at fair + edge; otherwise off the Polymarket touch.
+    窗口末尾只把多出来的一边扫盘卖掉配对；配平后由引擎冻结，剩余整对留给合并。
     """
     grid = tick or strategy.price_tick
     if fair is not None and strategy.fair_edge > 0:
@@ -74,12 +76,59 @@ def desired_asks(
     # Best bid each ask must stay above. Down bid is the mirror of the Up ask
     # (the observed touch, not our own price, which may rest behind it).
     bids = {"Up": up_bid, "Down": Decimal("1") - quantize_price(up_reference, tick or strategy.price_tick)}
+    exit_now = (
+        strategy.exit_market_seconds > 0
+        and seconds_left is not None
+        and 0 < seconds_left <= strategy.exit_market_seconds
+    )
     orders: list[DesiredOrder] = []
+    # 最后 N 秒且两边张数不等：只扫多出来的那边配对（如已卖 5 涨则卖 5 跌）。
+    if exit_now and inventory_up != inventory_down:
+        for outcome, inventory, other in (
+            ("Up", inventory_up, inventory_down),
+            ("Down", inventory_down, inventory_up),
+        ):
+            if outcome in skip:
+                continue
+            heavy = inventory - other
+            if heavy < strategy.min_order_size:
+                continue
+            bid = bids[outcome]
+            if strategy.exit_sweep:
+                exit_price = grid
+                exit_rule = "exit_market_sweep"
+            else:
+                if bid is None or bid <= 0:
+                    continue
+                slip = grid * max(0, strategy.exit_slip_ticks)
+                exit_price = quantize_price(max(grid, bid - slip), grid)
+                exit_rule = "exit_market_bid"
+            size = min(clips.next_size(), heavy)
+            if size < strategy.min_order_size:
+                continue
+            orders.append(
+                DesiredOrder(
+                    outcome=outcome,
+                    side=Side.SELL,
+                    price=exit_price,
+                    size=size,
+                    kind=OrderKind.LIMIT_TAKER,
+                    rule=exit_rule,
+                    reference_price=up_reference,
+                    position=inventory,
+                    risk_checks=[],
+                    touch_bid=bid,
+                )
+            )
+        return orders
     for outcome, price, inventory in (
         ("Up", up_price, inventory_up),
         ("Down", down_price, inventory_down),
     ):
         if outcome in skip or inventory < strategy.min_order_size:
+            continue
+        # 卖价太低就不挂，避免像 0.32 那种把便宜一边整批发掉。
+        if strategy.min_ask_price > 0 and price <= strategy.min_ask_price:
             continue
         size = min(clips.next_size(), inventory)
         # Keep the submitted size on the observed grid when inventory allows.

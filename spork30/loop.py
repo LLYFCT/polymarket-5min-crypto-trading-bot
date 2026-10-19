@@ -319,6 +319,7 @@ def _payload(engine: Engine, action) -> dict | None:
             "side": detail["side"],
             "price": detail["price"],
             "size": detail["size"],
+            "post_only": detail.get("post_only", True),
         }
     if action.kind == "CANCEL":
         order = _find_order(engine, detail.get("order_id", ""))
