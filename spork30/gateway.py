@@ -558,6 +558,7 @@ class PolymarketVenue:
             market = _first(self.client.list_markets(slug=slug, closed=True, page_size=1))
             if market is None:
                 raise
+        market = _unwrap_market(market)
         up = down = ""
         up_index = -1
         for index, leg in enumerate((market.outcomes.yes, market.outcomes.no)):
@@ -707,9 +708,22 @@ def _api_key(builder_type, relayer_type):
     return None
 
 
+def _unwrap_market(market):
+    items = getattr(market, "items", None)
+    if items is not None and not hasattr(market, "outcomes"):
+        if not items:
+            raise RuntimeError("market page was empty")
+        return items[0]
+    return market
+
+
 def _first(paginator):
+    # 新版 SDK 迭代出来的是 Page，里面才是市场列表。
     try:
         for item in paginator:
+            items = getattr(item, "items", None)
+            if items is not None and not hasattr(item, "outcomes"):
+                return items[0] if items else None
             return item
     except Exception:
         return None
