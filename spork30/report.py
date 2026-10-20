@@ -67,13 +67,15 @@ def _replay(path: Path) -> Book:
 
 
 def _day_value(rows: list[dict], day: str) -> dict:
-    """所选北京时间日期：亏损只加已结束且为负的局。"""
+    """所选北京时间日期：净盈亏加除报价中以外的账面；亏损只加已结束且为负。"""
     picked = [item for item in rows if item["day"] == day]
     closed = [item for item in picked if item["phase_key"] == "CLOSED"]
+    # 净盈亏：当天账面全加，报价中（还在挂）不算。
+    settled = [item for item in picked if item["phase_key"] != "QUOTING"]
     loss = sum((_dec(item["cash_value"]) for item in closed if _dec(item["cash_value"]) < 0), Decimal("0"))
-    net = sum((_dec(item["cash_value"]) for item in closed), Decimal("0"))
+    net = sum((_dec(item["cash_value"]) for item in settled), Decimal("0"))
     open_cash = sum(
-        (_dec(item["cash_value"]) for item in picked if item["phase_key"] not in {"CLOSED", "HALTED"}),
+        (_dec(item["cash_value"]) for item in picked if item["phase_key"] == "QUOTING"),
         Decimal("0"),
     )
     halted = [item for item in picked if item["phase_key"] == "HALTED"]
@@ -210,7 +212,6 @@ _PAGE = """<!DOCTYPE html>
   th, td { text-align: right; padding: 8px; border-bottom: 1px solid #efeae1; white-space: nowrap; font-variant-numeric: tabular-nums; }
   th { color: #6d675e; font-weight: 500; font-size: 12px; }
   td:first-child, th:first-child, td:nth-child(2), th:nth-child(2), td:nth-child(3), th:nth-child(3) { text-align: left; }
-  tr.halt { background: #faf3ef; }
 </style>
 </head>
 <body>
@@ -220,21 +221,7 @@ _PAGE = """<!DOCTYPE html>
     <label>日期<select id="day"></select></label>
   </div>
   <div class="cards" id="cards"></div>
-  <p class="hint">当日亏损只加所选日期里已结束且账面为负的局。未结束和停掉仍剩代币的局不算亏损。</p>
-  <section>
-    <h2>停止原因</h2>
-    <table>
-      <thead><tr><th>原因</th><th>局数</th><th>账面</th></tr></thead>
-      <tbody id="halts"></tbody>
-    </table>
-  </section>
-  <section>
-    <h2>还剩代币</h2>
-    <table>
-      <thead><tr><th>北京时间</th><th>局</th><th>状态</th><th>剩涨/跌</th><th>账面</th><th>备注</th></tr></thead>
-      <tbody id="holding"></tbody>
-    </table>
-  </section>
+  <p class="hint">单日净盈亏 = 所选日期账面相加，不含报价中。绿赚红亏。</p>
   <section>
     <h2>明细</h2>
     <table>
@@ -254,8 +241,7 @@ function card(label, value) {
   return '<div class="card"><span>' + label + '</span><b class="' + cls(value) + '">' + value + '</b></div>';
 }
 function rowLine(row) {
-  const mark = row.phase_key === "HALTED" ? "halt" : "";
-  return '<tr class="' + mark + '"><td>' + row.when + '</td><td>' + row.slug + '</td><td>' + row.phase
+  return '<tr><td>' + row.when + '</td><td>' + row.slug + '</td><td>' + row.phase
     + '</td><td>' + row.sold_up + ' @ ' + row.up_px + '</td><td>' + row.sold_down + ' @ ' + row.down_px
     + '</td><td>' + row.pair + '</td><td>' + row.left_up + ' / ' + row.left_down
     + '</td><td class="' + cls(row.cash) + '">' + row.cash + '</td><td>' + row.winner
@@ -270,20 +256,11 @@ async function load() {
   }).join("");
   day.value = data.selected;
   document.getElementById("cards").innerHTML = [
-    card("当日亏损", data.day_loss),
-    card("当天净盈亏", data.day_net),
-    card("未结束账面", data.open_cash),
+    card("单日净盈亏", data.day_net),
+    card("报价中账面", data.open_cash),
     card("赢 / 亏 / 平", data.wins + " / " + data.losses + " / " + data.flats),
     card("已结束 / 停止", data.closed_count + " / " + data.halted),
   ].join("");
-  document.getElementById("halts").innerHTML = data.halts.map(function (item) {
-    return "<tr><td>" + item.reason + "</td><td>" + item.count + "</td><td class='" + cls(item.cash) + "'>" + item.cash + "</td></tr>";
-  }).join("") || "<tr><td>-</td><td>0</td><td>0</td></tr>";
-  document.getElementById("holding").innerHTML = data.holding.map(function (row) {
-    return "<tr><td>" + row.when + "</td><td>" + row.slug + "</td><td>" + row.phase
-      + "</td><td>" + row.left_up + " / " + row.left_down + "</td><td class='" + cls(row.cash) + "'>" + row.cash
-      + "</td><td>" + (row.note || "-") + "</td></tr>";
-  }).join("") || "<tr><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>";
   document.getElementById("body").innerHTML = data.rows.map(rowLine).join("");
 }
 document.getElementById("day").addEventListener("change", function (event) {

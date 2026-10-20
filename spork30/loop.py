@@ -222,7 +222,12 @@ def run_live(stop: threading.Event | None = None, quiet: bool = False) -> None:
             f"lead {config.strategy.split_lead_seconds}s "
             f"redeem {config.strategy.redeem_delay_seconds}s "
             f"merge {config.strategy.flatten_delay_seconds}s "
-            f"fair_edge {config.strategy.fair_edge} lean_cap {config.strategy.max_lean_shares}",
+            f"fair_edge {config.strategy.fair_edge} lean_cap {config.strategy.max_lean_shares} "
+            f"pair {config.strategy.pair_ask_min}-{config.strategy.pair_ask_max} "
+            f"residual mid={config.strategy.residual_target_mid} "
+            f"early={config.strategy.residual_edge_early} "
+            f"join_under={config.strategy.residual_join_max_under_be} "
+            f"exit_market={config.strategy.exit_market_seconds}s",
             flush=True,
         )
     try:

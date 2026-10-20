@@ -97,6 +97,11 @@ class MarketPosition:
     flatten_done: bool = False
     # 局末兜底卖完配对后为真，剩余涨跌不再挂单，留给合并。
     quotes_frozen: bool = False
+    # 本局各边已实现卖出（算残腿 sold_avg）
+    sold_up_size: Decimal = Decimal("0")
+    sold_up_notional: Decimal = Decimal("0")
+    sold_down_size: Decimal = Decimal("0")
+    sold_down_notional: Decimal = Decimal("0")
     winner: str | None = None
     resolved: bool = False
     orders: dict[str, WorkingOrder] = field(default_factory=dict)

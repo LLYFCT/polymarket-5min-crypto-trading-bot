@@ -114,14 +114,32 @@ class StrategyConfig:
     # because of partials, so this is a prior. CLIP_SIZE=5 时只挂固定张数。
     clip_sizes: tuple[int, ...] = (5, 10, 15, 20)
     clip_weights: tuple[int, ...] = (8892, 11348, 6151, 581)
-    # 算出的卖价不高于这个数就不挂。0 表示不限制。
+    # 可选单边过滤；0=关。主开挂用 pair_ask_*，避免只挂一边。
     min_ask_price: Decimal = Decimal("0")
-    # 窗口结束前 N 秒：被下限挡住的一边市价卖掉。0 表示关闭。
+    max_ask_price: Decimal = Decimal("0")
+    # 平衡仓：涨跌算价都须落在此带内才两边开挂（互补可行，勿设成双进 0.6～0.68）
+    pair_ask_min: Decimal = Decimal("0.38")
+    pair_ask_max: Decimal = Decimal("0.62")
+    # 残腿保本：P_be = 1 - 已卖均价 - buffer
+    residual_fee_buffer: Decimal = Decimal("0.01")
+    # 残腿还早（seconds_left > exit_idle）时目标 = P_be + early
+    residual_edge_early: Decimal = Decimal("0.15")
+    # 残腿中段目标价（与 P_be 取较大）
+    residual_target_mid: Decimal = Decimal("0.50")
+    # 末段 be：买一低于保本时贴买一上方，允许破保本成交（非盲目 0.01）
+    residual_join_bid: bool = True
+    # 贴买一时的最低价；买一更低也至少挂到这（0=可跟到 1 档）
+    residual_join_min_price: Decimal = Decimal("0.05")
+    # P_be - join价 超过此值则禁止 be_join，冻结残腿报价
+    residual_join_max_under_be: Decimal = Decimal("0.15")
+    # 窗口结束前 N 秒：残腿贴保本；未进残腿时库存不等仍可能旧扫盘。
     exit_market_seconds: int = 0
-    # 兜底是否扫买盘：1=挂到最小价保证成交；0=打在买价再减 EXIT_SLIP_TICKS。
+    # 兜底是否扫买盘：仅非残腿且仍走旧分支时用；残腿默认不扫 0.01。
     exit_sweep: bool = False
     # 非扫盘时，卖价 = 买价 - N 档，减少追跌挂不上。
     exit_slip_ticks: int = 2
+    # 结束前 N 秒：两边库存仍相等（含都没成交）→ 停挂等合并。0 关闭。
+    exit_idle_seconds: int = 0
     dust_shares: Decimal = Decimal("1")
 
 
@@ -210,6 +228,8 @@ def load_config() -> AppConfig:
     root = os.path.join(base, "live" if mode is TradingMode.LIVE else "sim")
     defaults = StrategyConfig()
     clip_sizes, clip_weights = _clip_schedule(defaults)
+    # 未写 MAX_ORDER_SIZE 时，跟 CLIP_SIZE（或 CLIP_SIZES 最大档）走。
+    max_order = _decimal("MAX_ORDER_SIZE", str(max(clip_sizes)))
     return AppConfig(
         trading_mode=mode,
         strategy=StrategyConfig(
@@ -231,22 +251,40 @@ def load_config() -> AppConfig:
             clip_sizes=clip_sizes,
             clip_weights=clip_weights,
             min_ask_price=_decimal("MIN_ASK_PRICE", "0"),
+            max_ask_price=_decimal("MAX_ASK_PRICE", "0"),
+            pair_ask_min=_decimal("PAIR_ASK_MIN", str(defaults.pair_ask_min)),
+            pair_ask_max=_decimal("PAIR_ASK_MAX", str(defaults.pair_ask_max)),
+            residual_fee_buffer=_decimal("RESIDUAL_FEE_BUFFER", str(defaults.residual_fee_buffer)),
+            residual_edge_early=_decimal("RESIDUAL_EDGE_EARLY", str(defaults.residual_edge_early)),
+            residual_target_mid=_decimal("RESIDUAL_TARGET_MID", str(defaults.residual_target_mid)),
+            residual_join_bid=os.environ.get(
+                "RESIDUAL_JOIN_BID", "1" if defaults.residual_join_bid else "0"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
+            residual_join_min_price=_decimal(
+                "RESIDUAL_JOIN_MIN_PRICE", str(defaults.residual_join_min_price)
+            ),
+            residual_join_max_under_be=_decimal(
+                "RESIDUAL_JOIN_MAX_UNDER_BE", str(defaults.residual_join_max_under_be)
+            ),
             exit_market_seconds=_int("EXIT_MARKET_SECONDS", defaults.exit_market_seconds),
             exit_sweep=os.environ.get(
                 "EXIT_SWEEP", "1" if defaults.exit_sweep else "0"
             ).strip().lower()
             in {"1", "true", "yes", "on"},
             exit_slip_ticks=_int("EXIT_SLIP_TICKS", defaults.exit_slip_ticks),
+            exit_idle_seconds=_int("EXIT_IDLE_SECONDS", defaults.exit_idle_seconds),
         ),
         risk=RiskConfig(
             max_position_per_outcome=_decimal("MAX_POSITION", "800"),
-            max_order_size=_decimal("MAX_ORDER_SIZE", "20"),
+            max_order_size=max_order,
             max_daily_loss=_decimal("MAX_DAILY_LOSS", "1000"),
             max_total_exposure=_decimal("MAX_TOTAL_EXPOSURE", "3000"),
             max_orders_per_10s=_int("MAX_ORDER_RATE", 40),
             max_retry_count=_int("MAX_RETRY_COUNT", 3),
             stale_data_timeout_seconds=_int("STALE_DATA_TIMEOUT", 5),
-            min_price=_decimal("MIN_ASK_PRICE", str(RiskConfig.min_price)),
+            # 风控绝对底价，勿与 MIN_ASK_PRICE（第一腿策略下限）混用。
+            min_price=_decimal("RISK_MIN_PRICE", str(RiskConfig.min_price)),
         ),
         state_path=os.path.join(root, "state.json"),
         decision_log_path=os.path.join(root, "decisions.jsonl"),

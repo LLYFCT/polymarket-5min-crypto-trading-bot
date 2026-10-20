@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from spork30.config import AppConfig
-from spork30.execution import ClipSchedule, desired_asks, reference_up
+from spork30.execution import ClipSchedule, desired_asks, reference_up, residual_leg, residual_target
 from spork30.models import BookTop, DesiredOrder, MarketPosition, OrderKind, Phase, Side, WorkingOrder, window_start_for
 from spork30.risk import RiskRefusal, RiskState, check_order, note_order
 from spork30.strategy import (
@@ -351,13 +351,17 @@ class Engine:
             strategy.exit_market_seconds > 0
             and 0 < seconds_left <= strategy.exit_market_seconds
         )
-        # 进入末段：两边张数已相等（含一直 10/10）则立刻冻结，不再开单，等合并。
-        # 张数不等时先走下面的扫盘配对，配平后下一秒也会进这里冻住。
-        if market.quotes_frozen or (exit_now and market.up == market.down):
+        # 最后 180s：两边张数相等（含都没成交）→ 停挂，等合并。
+        idle = (
+            strategy.exit_idle_seconds > 0
+            and 0 < seconds_left <= strategy.exit_idle_seconds
+        )
+        if market.quotes_frozen or ((exit_now or idle) and market.up == market.down):
             if not market.quotes_frozen:
                 market.quotes_frozen = True
                 self._log({"event": "quotes_frozen", "slug": market.slug, "ts": now,
-                           "up": str(market.up), "down": str(market.down)})
+                           "up": str(market.up), "down": str(market.down),
+                           "seconds_left": seconds_left})
             if any(order.live for order in market.orders.values()):
                 self._cancel_all(market, "quotes_frozen")
                 actions.append(Action("QUOTES_PULLED", market.slug, {"reason": "quotes_frozen"}))
@@ -394,9 +398,22 @@ class Engine:
         tick = (book.tick if book is not None and book.tick else None) or strategy.price_tick
         live = {order.outcome: order for order in market.orders.values() if order.live and order.side is Side.SELL}
         # Pair-balance cap: withdraw the ask on the side that has run ahead.
-        # 局末扫盘配对时不 lean，否则多出来的那边会被停掉。
+        # 残腿/局末扫盘时不 lean，否则重仓侧会被停掉。
+        inv_up = market.up
+        inv_down = market.down
+        residual_now = residual_leg(
+            inv_up,
+            inv_down,
+            market.sold_up_size,
+            market.sold_up_notional,
+            market.sold_down_size,
+            market.sold_down_notional,
+            strategy,
+        )
+        # 差额够下单才关 lean，避免 1～4 张小瘸腿把重仓也挂停
+        in_residual = residual_now is not None and residual_now[3] >= strategy.min_order_size
         blocked = frozenset()
-        if not exit_now:
+        if not exit_now and not in_residual:
             blocked = frozenset(o for o in ("Up", "Down") if lean_blocked(o, market.up, market.down, strategy))
         for outcome in blocked:
             current = live.pop(outcome, None)
@@ -424,7 +441,53 @@ class Engine:
             skip=blocked,
             fair=fair,
             seconds_left=seconds_left,
+            sold_up_size=market.sold_up_size,
+            sold_up_notional=market.sold_up_notional,
+            sold_down_size=market.sold_down_size,
+            sold_down_notional=market.sold_down_notional,
         )
+        # 残腿贴买一相对保本过深：冻结本窗，不再挂
+        if any(o.rule == "residual_join_blocked" for o in desired):
+            if not market.quotes_frozen:
+                market.quotes_frozen = True
+                self._log({
+                    "event": "quotes_frozen",
+                    "slug": market.slug,
+                    "ts": now,
+                    "reason": "residual_join_blocked",
+                    "up": str(market.up),
+                    "down": str(market.down),
+                    "seconds_left": seconds_left,
+                })
+            if any(order.live for order in market.orders.values()):
+                self._cancel_all(market, "residual_join_blocked")
+                actions.append(Action("QUOTES_PULLED", market.slug, {"reason": "residual_join_blocked"}))
+            return actions
+        residual_info = residual_leg(
+            market.up - reserved["Up"],
+            market.down - reserved["Down"],
+            market.sold_up_size,
+            market.sold_up_notional,
+            market.sold_down_size,
+            market.sold_down_notional,
+            strategy,
+        )
+        if residual_info is not None and residual_info[3] >= strategy.min_order_size:
+            heavy, p_be, sold_avg, gap = residual_info
+            _, tier = residual_target(p_be, seconds_left, strategy)
+            self._log({
+                "event": "residual_quote",
+                "slug": market.slug,
+                "ts": now,
+                "heavy": heavy,
+                "p_be": str(p_be),
+                "sold_avg": str(sold_avg),
+                "gap": str(gap),
+                "tier": tier,
+                "seconds_left": seconds_left,
+                "price": str(desired[0].price) if desired else None,
+                "size": str(desired[0].size) if desired else None,
+            })
         if fair is not None:
             market.last_fair = fair
         # 算价跌破下限后不再出现在 desired 里，撤掉还挂着的单。
@@ -596,6 +659,13 @@ class Engine:
         order.filled += size
         market.add(order.outcome, -size)
         market.cash += size * price
+        # 累计本局卖出，供残腿保本均价
+        if order.outcome == "Up":
+            market.sold_up_size += size
+            market.sold_up_notional += size * price
+        else:
+            market.sold_down_size += size
+            market.sold_down_notional += size * price
         if order.remaining <= Decimal("0.000001"):
             order.live = False
             # Nothing is resting on the exchange any more; there is nothing to
@@ -642,6 +712,10 @@ class Engine:
                     "split_submitted": market.split_submitted,
                     "flatten_done": market.flatten_done,
                     "quotes_frozen": market.quotes_frozen,
+                    "sold_up_size": str(market.sold_up_size),
+                    "sold_up_notional": str(market.sold_up_notional),
+                    "sold_down_size": str(market.sold_down_size),
+                    "sold_down_notional": str(market.sold_down_notional),
                     "winner": market.winner,
                     "resolved": market.resolved,
                     "halt_reason": market.halt_reason,
@@ -689,6 +763,10 @@ class Engine:
                 split_submitted=bool(row["split_submitted"]),
                 flatten_done=bool(row["flatten_done"]),
                 quotes_frozen=bool(row.get("quotes_frozen", False)),
+                sold_up_size=Decimal(row.get("sold_up_size") or "0"),
+                sold_up_notional=Decimal(row.get("sold_up_notional") or "0"),
+                sold_down_size=Decimal(row.get("sold_down_size") or "0"),
+                sold_down_notional=Decimal(row.get("sold_down_notional") or "0"),
                 winner=row.get("winner"),
                 resolved=bool(row["resolved"]),
                 halt_reason=row.get("halt_reason"),
